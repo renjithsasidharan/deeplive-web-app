@@ -5,14 +5,17 @@ import VideocamOffIcon from '@mui/icons-material/VideocamOff';
 
 const VideoStream = () => {
     const videoRef = useRef(null);
+    const canvasRef = useRef(null);
     const wsRef = useRef(null);
+    const lastFrameTimeRef = useRef(0);
     const [isStreaming, setIsStreaming] = useState(false);
     const [isPlaying, setIsPlaying] = useState(false);
     const [videoDevices, setVideoDevices] = useState([]);
     const [selectedDevice, setSelectedDevice] = useState('');
 
+    const FRAME_INTERVAL = 100; // 100ms between frames, i.e., 10 FPS
+
     useEffect(() => {
-        // Fetch available video devices
         const getVideoDevices = async () => {
             try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
@@ -30,18 +33,47 @@ const VideoStream = () => {
     }, []);
 
     useEffect(() => {
+        let animationFrameId;
+
         const connectWebSocket = () => {
             wsRef.current = new WebSocket('ws://localhost:8000/ws/video');
 
             wsRef.current.onopen = () => {
                 console.log('WebSocket connected');
                 setIsStreaming(true);
+                sendFrame();
             };
 
             wsRef.current.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 wsRef.current.close();
             };
+
+            wsRef.current.onclose = () => {
+                console.log('WebSocket closed');
+                setIsStreaming(false);
+            };
+        };
+
+        const sendFrame = (timestamp) => {
+            if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
+                if (videoRef.current && canvasRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    const context = canvasRef.current.getContext('2d');
+                    context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+                    canvasRef.current.toBlob(
+                        (blob) => {
+                            if (blob) {
+                                wsRef.current.send(blob);
+                                console.log(`Sent frame of size: ${blob.size} bytes`);
+                            }
+                        },
+                        'image/jpeg',
+                        0.8
+                    );
+                }
+                lastFrameTimeRef.current = timestamp;
+            }
+            animationFrameId = requestAnimationFrame(sendFrame);
         };
 
         const startVideoStream = async () => {
@@ -52,6 +84,7 @@ const VideoStream = () => {
                 if (videoRef.current) {
                     videoRef.current.srcObject = stream;
                     videoRef.current.onloadedmetadata = () => {
+                        videoRef.current.play();
                         setIsPlaying(true);
                         connectWebSocket();
                     };
@@ -70,6 +103,9 @@ const VideoStream = () => {
             if (wsRef.current) {
                 wsRef.current.close();
             }
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
         }
 
         return () => {
@@ -78,6 +114,9 @@ const VideoStream = () => {
             }
             if (videoRef.current && videoRef.current.srcObject) {
                 videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+            }
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
             }
         };
     }, [isPlaying, selectedDevice]);
@@ -121,6 +160,7 @@ const VideoStream = () => {
                     </Typography>
                 )}
             </Paper>
+            <canvas ref={canvasRef} style={{ display: 'none' }} width={320} height={240} />
             <Select
                 value={selectedDevice}
                 onChange={handleDeviceChange}
