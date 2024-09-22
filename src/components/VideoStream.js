@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Select, MenuItem, Button, Typography, Box, Paper, Checkbox, FormGroup, FormControlLabel, Avatar, IconButton } from '@mui/material';
+import { Select, MenuItem, Button, Typography, Box, Paper, Checkbox, FormControlLabel, Avatar, IconButton } from '@mui/material';
 import VideocamIcon from '@mui/icons-material/Videocam';
 import VideocamOffIcon from '@mui/icons-material/VideocamOff';
+import ScreenShareIcon from '@mui/icons-material/ScreenShare';
+import StopScreenShareIcon from '@mui/icons-material/StopScreenShare';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { BACKEND_URL, WS_URL } from '../config';
@@ -19,6 +21,7 @@ const VideoStream = () => {
     const lastFrameTimeRef = useRef(0);
     const [isStreaming, setIsStreaming] = useState(false);
     const [isPlaying, setIsPlaying] = useState(false);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [videoDevices, setVideoDevices] = useState([]);
     const [selectedDevice, setSelectedDevice] = useState('');
     const [frameProcessors, setFrameProcessors] = useState({
@@ -30,9 +33,11 @@ const VideoStream = () => {
     const [maintainFps, setMaintainFps] = useState(false);
     const [fps, setFps] = useState(0);
 
-    const FRAME_INTERVAL = 50; // 50ms between frames, i.e., 20 FPS
+    const FRAME_INTERVAL = 25;
     const FRAME_WIDTH = 320*2;  // Reduced frame width
     const FRAME_HEIGHT = 240*2; // Reduced frame height
+
+    const streamRef = useRef(null);
 
     useEffect(() => {
         const getVideoDevices = async () => {
@@ -83,7 +88,6 @@ const VideoStream = () => {
             wsRef.current = new WebSocket(WS_URL);
 
             wsRef.current.onopen = () => {
-                console.log('WebSocket connected');
                 setIsStreaming(true);
                 sendFrame();
             };
@@ -114,11 +118,9 @@ const VideoStream = () => {
 
             wsRef.current.onerror = (error) => {
                 console.error('WebSocket error:', error);
-                wsRef.current.close();
             };
 
             wsRef.current.onclose = () => {
-                console.log('WebSocket closed');
                 setIsStreaming(false);
             };
         };
@@ -143,30 +145,9 @@ const VideoStream = () => {
             animationFrameId = requestAnimationFrame(sendFrame);
         };
 
-        const startVideoStream = async () => {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { deviceId: selectedDevice ? { exact: selectedDevice } : undefined }
-                });
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                    videoRef.current.onloadedmetadata = () => {
-                        videoRef.current.play();
-                        setIsPlaying(true);
-                        connectWebSocket();
-                    };
-                }
-            } catch (error) {
-                console.error('Error accessing video stream:', error);
-            }
-        };
-
-        if (isPlaying && selectedDevice) {
-            startVideoStream();
+        if (isPlaying || isScreenSharing) {
+            connectWebSocket();
         } else {
-            if (videoRef.current && videoRef.current.srcObject) {
-                videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-            }
             if (wsRef.current) {
                 wsRef.current.close();
             }
@@ -179,23 +160,78 @@ const VideoStream = () => {
             if (wsRef.current) {
                 wsRef.current.close();
             }
-            if (videoRef.current && videoRef.current.srcObject) {
-                videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-            }
             if (animationFrameId) {
                 cancelAnimationFrame(animationFrameId);
             }
         };
-    }, [isPlaying, selectedDevice]);
+    }, [isPlaying, isScreenSharing, selectedDevice, FRAME_HEIGHT, FRAME_WIDTH]);
+
+    useEffect(() => {
+        if (videoRef.current && streamRef.current) {
+            videoRef.current.srcObject = streamRef.current;
+        }
+    }, [isPlaying]);
 
     const togglePlayPause = async () => {
-        if (!isPlaying) {
-            // If starting the camera, set the selected source image
-            if (currentSourceImage) {
-                await setSourceImageOnBackend(currentSourceImage);
+        if (isScreenSharing) {
+            stopScreenShare();
+        } else if (!isPlaying) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { deviceId: selectedDevice ? { exact: selectedDevice } : undefined }
+                });
+                streamRef.current = stream;
+                setIsPlaying(true);
+            } catch (error) {
+                console.error('Error accessing video stream:', error);
+            }
+        } else {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+                streamRef.current = null;
+            }
+            setIsPlaying(false);
+        }
+    };
+
+    const toggleScreenShare = async () => {
+        if (isScreenSharing) {
+            stopScreenShare();
+        } else {
+            try {
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        displaySurface: "window",
+                    },
+                    audio: false
+                });
+                
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack.getSettings().displaySurface !== 'window') {
+                    stream.getTracks().forEach(track => track.stop());
+                    return;
+                }
+
+                streamRef.current = stream;
+                setIsScreenSharing(true);
+                setIsPlaying(true);
+
+                videoTrack.onended = () => {
+                    stopScreenShare();
+                };
+            } catch (error) {
+                console.error('Error accessing screen share:', error);
             }
         }
-        setIsPlaying(!isPlaying);
+    };
+
+    const stopScreenShare = () => {
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+        }
+        setIsScreenSharing(false);
+        setIsPlaying(false);
     };
 
     const setSourceImageOnBackend = async (imageId) => {
@@ -409,15 +445,27 @@ const VideoStream = () => {
                     </MenuItem>
                 ))}
             </Select>
-            <Button
-                variant="contained"
-                color={isPlaying ? "error" : "primary"}
-                startIcon={isPlaying ? <VideocamOffIcon /> : <VideocamIcon />}
-                onClick={togglePlayPause}
-            >
-                {isPlaying ? "Stop Camera" : "Start Camera"}
-            </Button>
-            <FormGroup>
+            <Box sx={{ display: 'flex', gap: 2 }}>
+                <Button
+                    variant="contained"
+                    color={isPlaying && !isScreenSharing ? "error" : "primary"}
+                    startIcon={isPlaying && !isScreenSharing ? <VideocamOffIcon /> : <VideocamIcon />}
+                    onClick={togglePlayPause}
+                    disabled={isScreenSharing}
+                >
+                    {isPlaying && !isScreenSharing ? "Stop Camera" : "Start Camera"}
+                </Button>
+                <Button
+                    variant="contained"
+                    color={isScreenSharing ? "error" : "primary"}
+                    startIcon={isScreenSharing ? <StopScreenShareIcon /> : <ScreenShareIcon />}
+                    onClick={toggleScreenShare}
+                    disabled={isPlaying && !isScreenSharing}
+                >
+                    {isScreenSharing ? "Stop Window Share" : "Share Window"}
+                </Button>
+            </Box>
+            <Box sx={{ display: 'flex', flexDirection: 'row', gap: 2, alignItems: 'center' }}>
                 <FormControlLabel
                     control={<Checkbox checked={frameProcessors.face_swapper} onChange={handleFrameProcessorChange} name="face_swapper" />}
                     label="Face Swapper"
@@ -430,7 +478,7 @@ const VideoStream = () => {
                     control={<Checkbox checked={maintainFps} onChange={handleMaintainFpsChange} />}
                     label="Maintain FPS"
                 />
-            </FormGroup>
+            </Box>
             <Typography variant="body2" color="text.secondary">
                 {isStreaming ? `Streaming... FPS: ${fps}` : 'Not streaming'}
             </Typography>
