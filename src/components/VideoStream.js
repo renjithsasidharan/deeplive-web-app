@@ -4,6 +4,12 @@ import VideocamIcon from '@mui/icons-material/Videocam';
 import VideocamOffIcon from '@mui/icons-material/VideocamOff';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
+import { BACKEND_URL, WS_URL } from '../config';
+
+const DEFAULT_IMAGES = [
+    { id: 'default1', name: 'Default 1', path: './default_images/1.jpg' },
+    { id: 'default2', name: 'Default 2', path: './default_images/2.jpg' },
+];
 
 const VideoStream = () => {
     const videoRef = useRef(null);
@@ -21,6 +27,8 @@ const VideoStream = () => {
     });
     const [sourceImages, setSourceImages] = useState([]);
     const [currentSourceImage, setCurrentSourceImage] = useState(null);
+    const [maintainFps, setMaintainFps] = useState(false);
+    const [fps, setFps] = useState(0);
 
     const FRAME_INTERVAL = 50; // 50ms between frames, i.e., 20 FPS
     const FRAME_WIDTH = 320*2;  // Reduced frame width
@@ -44,10 +52,35 @@ const VideoStream = () => {
     }, []);
 
     useEffect(() => {
+        // Load default images
+        const loadDefaultImages = async () => {
+            const defaultImagePromises = DEFAULT_IMAGES.map(async (img) => {
+                const response = await fetch(img.path);
+                const blob = await response.blob();
+                const base64 = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.readAsDataURL(blob);
+                });
+                return { ...img, image: base64.split(',')[1] };
+            });
+
+            const loadedDefaultImages = await Promise.all(defaultImagePromises);
+            setSourceImages(loadedDefaultImages);
+            setCurrentSourceImage(loadedDefaultImages[0].id);
+
+            // Set the first default image as the current source image on the backend
+            await handleImageSelect(loadedDefaultImages[0].id);
+        };
+
+        loadDefaultImages();
+    }, []);
+
+    useEffect(() => {
         let animationFrameId;
 
         const connectWebSocket = () => {
-            wsRef.current = new WebSocket('ws://136.38.166.236:33242/ws/video');
+            wsRef.current = new WebSocket(WS_URL);
 
             wsRef.current.onopen = () => {
                 console.log('WebSocket connected');
@@ -56,15 +89,27 @@ const VideoStream = () => {
             };
 
             wsRef.current.onmessage = (event) => {
-                const blob = event.data;
-                const url = URL.createObjectURL(blob);
-                const img = new Image();
-                img.onload = () => {
-                    const ctx = processedCanvasRef.current.getContext('2d');
-                    ctx.drawImage(img, 0, 0, processedCanvasRef.current.width, processedCanvasRef.current.height);
-                    URL.revokeObjectURL(url);
-                };
-                img.src = url;
+                if (event.data instanceof Blob) {
+                    // Handle binary data (processed video frame)
+                    const url = URL.createObjectURL(event.data);
+                    const img = new Image();
+                    img.onload = () => {
+                        const ctx = processedCanvasRef.current.getContext('2d');
+                        ctx.drawImage(img, 0, 0, processedCanvasRef.current.width, processedCanvasRef.current.height);
+                        URL.revokeObjectURL(url);
+                    };
+                    img.src = url;
+                } else {
+                    // Handle text data (FPS information)
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.fps) {
+                            setFps(data.fps);
+                        }
+                    } catch (error) {
+                        console.error('Error processing WebSocket message:', error);
+                    }
+                }
             };
 
             wsRef.current.onerror = (error) => {
@@ -143,8 +188,44 @@ const VideoStream = () => {
         };
     }, [isPlaying, selectedDevice]);
 
-    const togglePlayPause = () => {
+    const togglePlayPause = async () => {
+        if (!isPlaying) {
+            // If starting the camera, set the selected source image
+            if (currentSourceImage) {
+                await setSourceImageOnBackend(currentSourceImage);
+            }
+        }
         setIsPlaying(!isPlaying);
+    };
+
+    const setSourceImageOnBackend = async (imageId) => {
+        const selectedImage = sourceImages.find(img => img.id === imageId);
+        if (selectedImage) {
+            const formData = new FormData();
+            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
+            formData.append('file', blob, 'image.jpg');
+
+            try {
+                const response = await fetch(`${BACKEND_URL}/set_source_image`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to set source image on backend');
+                }
+            } catch (error) {
+                console.error('Error setting source image:', error);
+                // Optionally, you can show an error message to the user here
+            }
+        }
+    };
+
+    const handleImageSelect = async (imageId) => {
+        setCurrentSourceImage(imageId);
+        if (isPlaying) {
+            await setSourceImageOnBackend(imageId);
+        }
     };
 
     const handleDeviceChange = (event) => {
@@ -165,20 +246,32 @@ const VideoStream = () => {
                 .filter(([_, value]) => value)
                 .map(([key, _]) => key);
 
-            updateBackendConfig(selectedProcessors);
+            updateBackendConfig(selectedProcessors, maintainFps);
 
             return updated;
         });
     };
 
-    const updateBackendConfig = async (selectedProcessors) => {
+    const handleMaintainFpsChange = (event) => {
+        const newMaintainFps = event.target.checked;
+        setMaintainFps(newMaintainFps);
+        const selectedProcessors = Object.entries(frameProcessors)
+            .filter(([_, value]) => value)
+            .map(([key, _]) => key);
+        updateBackendConfig(selectedProcessors, newMaintainFps);
+    };
+
+    const updateBackendConfig = async (selectedProcessors, maintainFps) => {
         try {
-            const response = await fetch('http://136.38.166.236:33242/set_config', {
+            const response = await fetch(`${BACKEND_URL}/set_config`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ frame_processors: selectedProcessors }),
+                body: JSON.stringify({ 
+                    frame_processors: selectedProcessors,
+                    maintain_fps: maintainFps
+                }),
             });
 
             if (!response.ok) {
@@ -197,7 +290,7 @@ const VideoStream = () => {
         formData.append('file', file);
 
         try {
-            const response = await fetch('http://136.38.166.236:33242/set_source_image', {
+            const response = await fetch(`${BACKEND_URL}/set_source_image`, {
                 method: 'POST',
                 body: formData,
             });
@@ -213,28 +306,6 @@ const VideoStream = () => {
             }
         } catch (error) {
             console.error('Error uploading image:', error);
-        }
-    };
-
-    const handleImageSelect = async (imageId) => {
-        const selectedImage = sourceImages.find(img => img.id === imageId);
-        if (selectedImage) {
-            const formData = new FormData();
-            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
-            formData.append('file', blob, 'image.jpg');
-
-            try {
-                const response = await fetch('http://136.38.166.236:33242/set_source_image', {
-                    method: 'POST',
-                    body: formData,
-                });
-
-                if (response.ok) {
-                    setCurrentSourceImage(imageId);
-                }
-            } catch (error) {
-                console.error('Error setting source image:', error);
-            }
         }
     };
 
@@ -260,13 +331,15 @@ const VideoStream = () => {
                             }}
                             onClick={() => handleImageSelect(image.id)}
                         />
-                        <IconButton
-                            size="small"
-                            sx={{ position: 'absolute', top: -8, right: -8 }}
-                            onClick={() => handleImageDelete(image.id)}
-                        >
-                            <DeleteIcon fontSize="small" />
-                        </IconButton>
+                        {!DEFAULT_IMAGES.some(defaultImg => defaultImg.id === image.id) && (
+                            <IconButton
+                                size="small"
+                                sx={{ position: 'absolute', top: -8, right: -8 }}
+                                onClick={() => handleImageDelete(image.id)}
+                            >
+                                <DeleteIcon fontSize="small" />
+                            </IconButton>
+                        )}
                     </Box>
                 ))}
                 <IconButton component="label">
@@ -353,9 +426,13 @@ const VideoStream = () => {
                     control={<Checkbox checked={frameProcessors.face_enhancer} onChange={handleFrameProcessorChange} name="face_enhancer" />}
                     label="Face Enhancer"
                 />
+                <FormControlLabel
+                    control={<Checkbox checked={maintainFps} onChange={handleMaintainFpsChange} />}
+                    label="Maintain FPS"
+                />
             </FormGroup>
             <Typography variant="body2" color="text.secondary">
-                {isStreaming ? 'Streaming...' : 'Not streaming'}
+                {isStreaming ? `Streaming... FPS: ${fps}` : 'Not streaming'}
             </Typography>
         </Box>
     );
