@@ -33,9 +33,9 @@ const VideoStream = () => {
     const [maintainFps, setMaintainFps] = useState(false);
     const [fps, setFps] = useState(0);
 
-    const FRAME_INTERVAL = 25;
-    const FRAME_WIDTH = 320*2;  // Reduced frame width
-    const FRAME_HEIGHT = 240*2; // Reduced frame height
+    const FRAME_INTERVAL = 25 ;
+    const FRAME_WIDTH = 480;  // Reduced frame width
+    const FRAME_HEIGHT = 320; // Reduced frame height
 
     const streamRef = useRef(null);
 
@@ -172,11 +172,39 @@ const VideoStream = () => {
         }
     }, [isPlaying]);
 
+    const setSourceImageOnBackend = async (imageId) => {
+        const selectedImage = sourceImages.find(img => img.id === imageId);
+        if (selectedImage) {
+            const formData = new FormData();
+            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
+            formData.append('file', blob, 'image.jpg');
+
+            try {
+                const response = await fetch(`${BACKEND_URL}/set_source_image`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to set source image on backend');
+                }
+            } catch (error) {
+                console.error('Error setting source image:', error);
+                // Optionally, you can show an error message to the user here
+            }
+        }
+    };
+
     const togglePlayPause = async () => {
         if (isScreenSharing) {
             stopScreenShare();
         } else if (!isPlaying) {
             try {
+                // Set the source image before starting the camera
+                if (currentSourceImage) {
+                    await setSourceImageOnBackend(currentSourceImage);
+                }
+
                 const stream = await navigator.mediaDevices.getUserMedia({
                     video: { deviceId: selectedDevice ? { exact: selectedDevice } : undefined }
                 });
@@ -199,6 +227,11 @@ const VideoStream = () => {
             stopScreenShare();
         } else {
             try {
+                // Set the source image before starting screen sharing
+                if (currentSourceImage) {
+                    await setSourceImageOnBackend(currentSourceImage);
+                }
+
                 const stream = await navigator.mediaDevices.getDisplayMedia({
                     video: {
                         displaySurface: "window",
@@ -234,32 +267,9 @@ const VideoStream = () => {
         setIsPlaying(false);
     };
 
-    const setSourceImageOnBackend = async (imageId) => {
-        const selectedImage = sourceImages.find(img => img.id === imageId);
-        if (selectedImage) {
-            const formData = new FormData();
-            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
-            formData.append('file', blob, 'image.jpg');
-
-            try {
-                const response = await fetch(`${BACKEND_URL}/set_source_image`, {
-                    method: 'POST',
-                    body: formData,
-                });
-
-                if (!response.ok) {
-                    throw new Error('Failed to set source image on backend');
-                }
-            } catch (error) {
-                console.error('Error setting source image:', error);
-                // Optionally, you can show an error message to the user here
-            }
-        }
-    };
-
     const handleImageSelect = async (imageId) => {
         setCurrentSourceImage(imageId);
-        if (isPlaying) {
+        if (isPlaying || isScreenSharing) {
             await setSourceImageOnBackend(imageId);
         }
     };

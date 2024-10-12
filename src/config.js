@@ -1,2 +1,2 @@
-export const BACKEND_URL = 'http://5.44.198.100:40541';
-export const WS_URL = 'ws://5.44.198.100:40541/ws/video';
+export const BACKEND_URL = 'http://153.204.80.81:51106';
+export const WS_URL = 'ws://153.204.80.81:51106/ws/video';
