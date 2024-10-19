@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Select, MenuItem, Button, Typography, Box, Paper, Checkbox, FormControlLabel, Avatar, IconButton } from '@mui/material';
 import VideocamIcon from '@mui/icons-material/Videocam';
 import VideocamOffIcon from '@mui/icons-material/VideocamOff';
@@ -6,12 +6,18 @@ import ScreenShareIcon from '@mui/icons-material/ScreenShare';
 import StopScreenShareIcon from '@mui/icons-material/StopScreenShare';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
+import CropIcon from '@mui/icons-material/Crop';
+import ReactCrop from 'react-image-crop';
+import 'react-image-crop/dist/ReactCrop.css';
 import { BACKEND_URL, WS_URL } from '../config';
 
 const DEFAULT_IMAGES = [
     { id: 'default1', name: 'Default 1', path: './default_images/1.jpg' },
     { id: 'default2', name: 'Default 2', path: './default_images/2.jpg' },
 ];
+
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_INTERVAL = 3000; // 3 seconds
 
 const VideoStream = () => {
     const videoRef = useRef(null);
@@ -32,12 +38,50 @@ const VideoStream = () => {
     const [currentSourceImage, setCurrentSourceImage] = useState(null);
     const [maintainFps, setMaintainFps] = useState(false);
     const [fps, setFps] = useState(0);
+    const [isCropping, setIsCropping] = useState(false);
+    const [crop, setCrop] = useState();
+    const [completedCrop, setCompletedCrop] = useState(null);
+    const cropCanvasRef = useRef(null);
+    const [wsConnected, setWsConnected] = useState(false);
+    const reconnectAttemptsRef = useRef(0);
+    const reconnectTimeoutRef = useRef(null);
+    const animationFrameIdRef = useRef(null);
 
     const FRAME_INTERVAL = 25 ;
     const FRAME_WIDTH = 480;  // Reduced frame width
     const FRAME_HEIGHT = 320; // Reduced frame height
 
     const streamRef = useRef(null);
+
+    const setSourceImageOnBackend = useCallback(async (imageId) => {
+        const selectedImage = sourceImages.find(img => img.id === imageId);
+        if (selectedImage) {
+            const formData = new FormData();
+            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
+            formData.append('file', blob, 'image.jpg');
+
+            try {
+                const response = await fetch(`${BACKEND_URL}/set_source_image`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to set source image on backend');
+                }
+            } catch (error) {
+                console.error('Error setting source image:', error);
+                // Optionally, you can show an error message to the user here
+            }
+        }
+    }, [sourceImages]); // Add sourceImages as a dependency
+
+    const handleImageSelect = useCallback(async (imageId) => {
+        setCurrentSourceImage(imageId);
+        if (isPlaying || isScreenSharing) {
+            await setSourceImageOnBackend(imageId);
+        }
+    }, [isPlaying, isScreenSharing, setSourceImageOnBackend]); // Add setSourceImageOnBackend to the dependency array
 
     useEffect(() => {
         const getVideoDevices = async () => {
@@ -73,23 +117,43 @@ const VideoStream = () => {
             const loadedDefaultImages = await Promise.all(defaultImagePromises);
             setSourceImages(loadedDefaultImages);
             setCurrentSourceImage(loadedDefaultImages[0].id);
-
-            // Set the first default image as the current source image on the backend
-            await handleImageSelect(loadedDefaultImages[0].id);
         };
 
         loadDefaultImages();
-    }, []);
+    }, []); // Empty dependency array as this should only run once on mount
 
     useEffect(() => {
-        let animationFrameId;
+        if (currentSourceImage) {
+            setSourceImageOnBackend(currentSourceImage);
+        }
+    }, [currentSourceImage, setSourceImageOnBackend]);
 
-        const connectWebSocket = () => {
+    const connectWebSocket = useCallback(() => {
+        const attemptConnect = () => {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                return; // Already connected
+            }
+
             wsRef.current = new WebSocket(WS_URL);
 
             wsRef.current.onopen = () => {
+                console.log('WebSocket connected');
+                setWsConnected(true);
                 setIsStreaming(true);
-                sendFrame();
+                reconnectAttemptsRef.current = 0;
+            };
+
+            wsRef.current.onclose = (event) => {
+                console.log('WebSocket disconnected', event);
+                setWsConnected(false);
+                setIsStreaming(false);
+                attemptReconnect();
+            };
+
+            wsRef.current.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                setWsConnected(false);
+                setIsStreaming(false);
             };
 
             wsRef.current.onmessage = (event) => {
@@ -115,44 +179,30 @@ const VideoStream = () => {
                     }
                 }
             };
-
-            wsRef.current.onerror = (error) => {
-                console.error('WebSocket error:', error);
-            };
-
-            wsRef.current.onclose = () => {
-                setIsStreaming(false);
-            };
         };
 
-        const sendFrame = (timestamp) => {
-            if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
-                if (videoRef.current && canvasRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    const context = canvasRef.current.getContext('2d');
-                    context.drawImage(videoRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
-                    canvasRef.current.toBlob(
-                        (blob) => {
-                            if (blob) {
-                                wsRef.current.send(blob);
-                            }
-                        },
-                        'image/jpeg',
-                        0.8
-                    );
-                }
-                lastFrameTimeRef.current = timestamp;
+        const attemptReconnect = () => {
+            if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttemptsRef.current += 1;
+                console.log(`Attempting to reconnect (${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS})...`);
+                reconnectTimeoutRef.current = setTimeout(attemptConnect, RECONNECT_INTERVAL);
+            } else {
+                console.error('Max reconnection attempts reached. Please try again later.');
             }
-            animationFrameId = requestAnimationFrame(sendFrame);
         };
 
+        attemptConnect();
+    }, []);  // Empty dependency array as all used variables are from refs or component scope
+
+    useEffect(() => {
         if (isPlaying || isScreenSharing) {
             connectWebSocket();
         } else {
             if (wsRef.current) {
                 wsRef.current.close();
             }
-            if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
             }
         }
 
@@ -160,11 +210,78 @@ const VideoStream = () => {
             if (wsRef.current) {
                 wsRef.current.close();
             }
-            if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
             }
         };
-    }, [isPlaying, isScreenSharing, selectedDevice, FRAME_HEIGHT, FRAME_WIDTH]);
+    }, [isPlaying, isScreenSharing, connectWebSocket]);
+
+    const toggleCropping = useCallback(() => {
+        setIsCropping((prev) => !prev);
+        if (isCropping) {
+            setCompletedCrop(null);
+            setCrop(undefined);
+        }
+    }, [isCropping]);
+
+    useEffect(() => {
+        if (!completedCrop || !cropCanvasRef.current || !videoRef.current) {
+            return;
+        }
+
+        const video = videoRef.current;
+        const canvas = cropCanvasRef.current;
+        const ctx = canvas.getContext('2d');
+
+        const scaleX = video.videoWidth / video.offsetWidth;
+        const scaleY = video.videoHeight / video.offsetHeight;
+
+        canvas.width = completedCrop.width;
+        canvas.height = completedCrop.height;
+
+        if (canvas.width > 0 && canvas.height > 0) {
+            ctx.drawImage(
+                video,
+                completedCrop.x * scaleX,
+                completedCrop.y * scaleY,
+                completedCrop.width * scaleX,
+                completedCrop.height * scaleY,
+                0,
+                0,
+                completedCrop.width,
+                completedCrop.height
+            );
+        }
+    }, [completedCrop]);
+
+    const sendFrame = useCallback((timestamp) => {
+        if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
+            if (videoRef.current && canvasRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                const context = canvasRef.current.getContext('2d');
+                context.clearRect(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+                
+                if (completedCrop && cropCanvasRef.current && cropCanvasRef.current.width > 0 && cropCanvasRef.current.height > 0) {
+                    context.drawImage(cropCanvasRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+                } else {
+                    context.drawImage(videoRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+                }
+
+                canvasRef.current.toBlob(
+                    (blob) => {
+                        if (blob && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                            wsRef.current.send(blob);
+                        } else if (!wsConnected) {
+                            console.warn('WebSocket not connected. Unable to send frame.');
+                        }
+                    },
+                    'image/jpeg',
+                    0.8
+                );
+            }
+            lastFrameTimeRef.current = timestamp;
+        }
+        animationFrameIdRef.current = requestAnimationFrame(sendFrame);
+    }, [wsConnected, completedCrop, FRAME_HEIGHT, FRAME_WIDTH]);
 
     useEffect(() => {
         if (videoRef.current && streamRef.current) {
@@ -172,28 +289,17 @@ const VideoStream = () => {
         }
     }, [isPlaying]);
 
-    const setSourceImageOnBackend = async (imageId) => {
-        const selectedImage = sourceImages.find(img => img.id === imageId);
-        if (selectedImage) {
-            const formData = new FormData();
-            const blob = await fetch(`data:image/jpeg;base64,${selectedImage.image}`).then(res => res.blob());
-            formData.append('file', blob, 'image.jpg');
-
-            try {
-                const response = await fetch(`${BACKEND_URL}/set_source_image`, {
-                    method: 'POST',
-                    body: formData,
-                });
-
-                if (!response.ok) {
-                    throw new Error('Failed to set source image on backend');
-                }
-            } catch (error) {
-                console.error('Error setting source image:', error);
-                // Optionally, you can show an error message to the user here
-            }
+    useEffect(() => {
+        if (wsConnected) {
+            animationFrameIdRef.current = requestAnimationFrame(sendFrame);
         }
-    };
+
+        return () => {
+            if (animationFrameIdRef.current) {
+                cancelAnimationFrame(animationFrameIdRef.current);
+            }
+        };
+    }, [wsConnected, sendFrame]);
 
     const togglePlayPause = async () => {
         if (isScreenSharing) {
@@ -265,13 +371,6 @@ const VideoStream = () => {
         }
         setIsScreenSharing(false);
         setIsPlaying(false);
-    };
-
-    const handleImageSelect = async (imageId) => {
-        setCurrentSourceImage(imageId);
-        if (isPlaying || isScreenSharing) {
-            await setSourceImageOnBackend(imageId);
-        }
     };
 
     const handleDeviceChange = (event) => {
@@ -393,7 +492,7 @@ const VideoStream = () => {
                     <input type="file" hidden onChange={handleImageUpload} accept="image/*" />
                 </IconButton>
             </Box>
-            <Box sx={{ display: 'flex', gap: 2 }}>
+            <Box sx={{ display: 'flex', gap: 2, position: 'relative' }}>
                 <Paper
                     elevation={3}
                     sx={{
@@ -404,16 +503,27 @@ const VideoStream = () => {
                         alignItems: 'center',
                         overflow: 'hidden',
                         bgcolor: 'grey.200',
+                        position: 'relative',
                     }}
                 >
-                    {isPlaying ? (
-                        <video
-                            ref={videoRef}
-                            autoPlay
-                            muted
-                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        />
-                    ) : (
+                    {isPlaying && (
+                        <ReactCrop
+                            crop={crop}
+                            onChange={(_, percentCrop) => setCrop(percentCrop)}
+                            onComplete={(c) => setCompletedCrop(c)}
+                            disabled={!isCropping}
+                            // Remove the aspect prop to allow free-form cropping
+                        >
+                            <video
+                                ref={videoRef}
+                                autoPlay
+                                muted
+                                playsInline
+                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            />
+                        </ReactCrop>
+                    )}
+                    {!isPlaying && (
                         <Typography variant="body1" color="text.secondary">
                             Camera Off
                         </Typography>
@@ -439,6 +549,7 @@ const VideoStream = () => {
                     />
                 </Paper>
             </Box>
+            <canvas ref={cropCanvasRef} style={{ display: 'none' }} />
             <canvas ref={canvasRef} style={{ display: 'none' }} width={FRAME_WIDTH} height={FRAME_HEIGHT} />
             <Select
                 value={selectedDevice}
@@ -474,6 +585,15 @@ const VideoStream = () => {
                 >
                     {isScreenSharing ? "Stop Window Share" : "Share Window"}
                 </Button>
+                <Button
+                    variant="contained"
+                    color={isCropping ? "secondary" : "primary"}
+                    startIcon={<CropIcon />}
+                    onClick={toggleCropping}
+                    disabled={!isPlaying && !isScreenSharing}
+                >
+                    {isCropping ? "Finish Cropping" : "Crop Video"}
+                </Button>
             </Box>
             <Box sx={{ display: 'flex', flexDirection: 'row', gap: 2, alignItems: 'center' }}>
                 <FormControlLabel
@@ -491,6 +611,7 @@ const VideoStream = () => {
             </Box>
             <Typography variant="body2" color="text.secondary">
                 {isStreaming ? `Streaming... FPS: ${fps}` : 'Not streaming'}
+                {!wsConnected && ' (WebSocket disconnected)'}
             </Typography>
         </Box>
     );
