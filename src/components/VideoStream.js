@@ -265,11 +265,65 @@ const VideoStream = () => {
         if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
             if (videoRef.current && canvasRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                 const context = canvasRef.current.getContext('2d');
+                
+                // Clear the canvas
                 context.clearRect(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
                 
-                if ((completedCrop || lastCompletedCrop) && cropCanvasRef.current && cropCanvasRef.current.width > 0 && cropCanvasRef.current.height > 0) {
-                    context.drawImage(cropCanvasRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+                const cropToUse = completedCrop || lastCompletedCrop;
+                if (cropToUse && cropToUse.width && cropToUse.height && cropCanvasRef.current) {
+                    try {
+                        // Update the crop canvas with the current video frame
+                        const cropCtx = cropCanvasRef.current.getContext('2d');
+                        const video = videoRef.current;
+                        
+                        // Get the scale factors
+                        const scaleX = video.videoWidth / video.offsetWidth;
+                        const scaleY = video.videoHeight / video.offsetHeight;
+                        
+                        // Ensure crop dimensions are valid
+                        const cropWidth = Math.max(1, cropToUse.width);
+                        const cropHeight = Math.max(1, cropToUse.height);
+                        
+                        // Set crop canvas dimensions to match the crop
+                        cropCanvasRef.current.width = cropWidth;
+                        cropCanvasRef.current.height = cropHeight;
+                        
+                        // Draw the current frame's crop region
+                        cropCtx.drawImage(
+                            video,
+                            cropToUse.x * scaleX,
+                            cropToUse.y * scaleY,
+                            cropWidth * scaleX,
+                            cropHeight * scaleY,
+                            0,
+                            0,
+                            cropWidth,
+                            cropHeight
+                        );
+                        
+                        // Calculate aspect ratio preserving dimensions for the main canvas
+                        const aspectRatio = cropWidth / cropHeight;
+                        let drawWidth = FRAME_WIDTH;
+                        let drawHeight = FRAME_WIDTH / aspectRatio;
+                        
+                        if (drawHeight > FRAME_HEIGHT) {
+                            drawHeight = FRAME_HEIGHT;
+                            drawWidth = FRAME_HEIGHT * aspectRatio;
+                        }
+                        
+                        // Center the image on the canvas
+                        const x = (FRAME_WIDTH - drawWidth) / 2;
+                        const y = (FRAME_HEIGHT - drawHeight) / 2;
+                        
+                        // Draw the cropped frame maintaining aspect ratio
+                        context.drawImage(cropCanvasRef.current, x, y, drawWidth, drawHeight);
+                    } catch (error) {
+                        console.warn('Error drawing cropped frame:', error);
+                        // Fallback to drawing the full frame if there's an error
+                        context.drawImage(videoRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+                    }
                 } else {
+                    // If no crop or invalid dimensions, draw the full frame
                     context.drawImage(videoRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
                 }
 
