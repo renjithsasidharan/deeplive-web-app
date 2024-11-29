@@ -344,11 +344,49 @@ const VideoStream = () => {
         animationFrameIdRef.current = requestAnimationFrame(sendFrame);
     }, [wsConnected, completedCrop, lastCompletedCrop, FRAME_HEIGHT, FRAME_WIDTH]);
 
+    const fitVideoToCanvas = useCallback(() => {
+        if (!videoRef.current) return;
+        
+        const video = videoRef.current;
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+        
+        if (!videoWidth || !videoHeight) return;
+        
+        const scaleWidth = FRAME_WIDTH / videoWidth;
+        const scaleHeight = FRAME_HEIGHT / videoHeight;
+        const scale = Math.min(scaleWidth, scaleHeight);
+        
+        const scaledWidth = videoWidth * scale;
+        const scaledHeight = videoHeight * scale;
+        
+        video.style.width = `${scaledWidth}px`;
+        video.style.height = `${scaledHeight}px`;
+    }, []);
+
     useEffect(() => {
         if (videoRef.current && streamRef.current) {
             videoRef.current.srcObject = streamRef.current;
+            videoRef.current.onloadedmetadata = () => {
+                videoRef.current.play();
+                fitVideoToCanvas();
+            };
         }
-    }, [isPlaying]);
+    }, [isPlaying, fitVideoToCanvas]);
+
+    useEffect(() => {
+        const resizeObserver = new ResizeObserver(() => {
+            fitVideoToCanvas();
+        });
+        
+        if (videoRef.current) {
+            resizeObserver.observe(videoRef.current);
+        }
+        
+        return () => {
+            resizeObserver.disconnect();
+        };
+    }, [fitVideoToCanvas]);
 
     useEffect(() => {
         if (wsConnected) {
@@ -572,13 +610,18 @@ const VideoStream = () => {
                         onChange={(_, percentCrop) => setCrop(percentCrop)}
                         onComplete={(c) => setCompletedCrop(c)}
                         disabled={!isCropping}
+                        style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
                     >
                         <video
                             ref={videoRef}
                             autoPlay
                             muted
                             playsInline
-                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            style={{
+                                maxWidth: '100%',
+                                maxHeight: '100%',
+                                objectFit: 'scale-down'
+                            }}
                         />
                     </ReactCrop>
                 </Paper>
