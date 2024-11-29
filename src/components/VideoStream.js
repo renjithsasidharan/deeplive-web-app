@@ -41,6 +41,7 @@ const VideoStream = () => {
     const [isCropping, setIsCropping] = useState(false);
     const [crop, setCrop] = useState();
     const [completedCrop, setCompletedCrop] = useState(null);
+    const [lastCompletedCrop, setLastCompletedCrop] = useState(null);
     const cropCanvasRef = useRef(null);
     const [wsConnected, setWsConnected] = useState(false);
     const reconnectAttemptsRef = useRef(0);
@@ -48,8 +49,8 @@ const VideoStream = () => {
     const animationFrameIdRef = useRef(null);
 
     const FRAME_INTERVAL = 25 ;
-    const FRAME_WIDTH = 480;  // Reduced frame width
-    const FRAME_HEIGHT = 320; // Reduced frame height
+    const FRAME_WIDTH = 480*2;  // Reduced frame width
+    const FRAME_HEIGHT = 300*2; // Reduced frame height
 
     const streamRef = useRef(null);
 
@@ -219,15 +220,21 @@ const VideoStream = () => {
     const toggleCropping = useCallback(() => {
         setIsCropping((prev) => !prev);
         if (isCropping) {
+            // When finishing cropping, save the last completed crop
+            setLastCompletedCrop(completedCrop);
             setCompletedCrop(null);
             setCrop(undefined);
+        } else {
+            // When starting cropping, clear the last completed crop
+            setLastCompletedCrop(null);
         }
-    }, [isCropping]);
+    }, [isCropping, completedCrop]);
 
     useEffect(() => {
-        if (!completedCrop || !cropCanvasRef.current || !videoRef.current) {
-            return;
-        }
+        if (!completedCrop && !lastCompletedCrop) return;
+        
+        const cropToUse = completedCrop || lastCompletedCrop;
+        if (!cropToUse || !cropCanvasRef.current || !videoRef.current) return;
 
         const video = videoRef.current;
         const canvas = cropCanvasRef.current;
@@ -236,23 +243,23 @@ const VideoStream = () => {
         const scaleX = video.videoWidth / video.offsetWidth;
         const scaleY = video.videoHeight / video.offsetHeight;
 
-        canvas.width = completedCrop.width;
-        canvas.height = completedCrop.height;
+        canvas.width = cropToUse.width;
+        canvas.height = cropToUse.height;
 
         if (canvas.width > 0 && canvas.height > 0) {
             ctx.drawImage(
                 video,
-                completedCrop.x * scaleX,
-                completedCrop.y * scaleY,
-                completedCrop.width * scaleX,
-                completedCrop.height * scaleY,
+                cropToUse.x * scaleX,
+                cropToUse.y * scaleY,
+                cropToUse.width * scaleX,
+                cropToUse.height * scaleY,
                 0,
                 0,
-                completedCrop.width,
-                completedCrop.height
+                cropToUse.width,
+                cropToUse.height
             );
         }
-    }, [completedCrop]);
+    }, [completedCrop, lastCompletedCrop]);
 
     const sendFrame = useCallback((timestamp) => {
         if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
@@ -260,7 +267,7 @@ const VideoStream = () => {
                 const context = canvasRef.current.getContext('2d');
                 context.clearRect(0, 0, FRAME_WIDTH, FRAME_HEIGHT);
                 
-                if (completedCrop && cropCanvasRef.current && cropCanvasRef.current.width > 0 && cropCanvasRef.current.height > 0) {
+                if ((completedCrop || lastCompletedCrop) && cropCanvasRef.current && cropCanvasRef.current.width > 0 && cropCanvasRef.current.height > 0) {
                     context.drawImage(cropCanvasRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
                 } else {
                     context.drawImage(videoRef.current, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
@@ -281,7 +288,7 @@ const VideoStream = () => {
             lastFrameTimeRef.current = timestamp;
         }
         animationFrameIdRef.current = requestAnimationFrame(sendFrame);
-    }, [wsConnected, completedCrop, FRAME_HEIGHT, FRAME_WIDTH]);
+    }, [wsConnected, completedCrop, lastCompletedCrop, FRAME_HEIGHT, FRAME_WIDTH]);
 
     useEffect(() => {
         if (videoRef.current && streamRef.current) {
@@ -506,28 +513,20 @@ const VideoStream = () => {
                         position: 'relative',
                     }}
                 >
-                    {isPlaying && (
-                        <ReactCrop
-                            crop={crop}
-                            onChange={(_, percentCrop) => setCrop(percentCrop)}
-                            onComplete={(c) => setCompletedCrop(c)}
-                            disabled={!isCropping}
-                            // Remove the aspect prop to allow free-form cropping
-                        >
-                            <video
-                                ref={videoRef}
-                                autoPlay
-                                muted
-                                playsInline
-                                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                            />
-                        </ReactCrop>
-                    )}
-                    {!isPlaying && (
-                        <Typography variant="body1" color="text.secondary">
-                            Camera Off
-                        </Typography>
-                    )}
+                    <ReactCrop
+                        crop={crop}
+                        onChange={(_, percentCrop) => setCrop(percentCrop)}
+                        onComplete={(c) => setCompletedCrop(c)}
+                        disabled={!isCropping}
+                    >
+                        <video
+                            ref={videoRef}
+                            autoPlay
+                            muted
+                            playsInline
+                            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        />
+                    </ReactCrop>
                 </Paper>
                 <Paper
                     elevation={3}
