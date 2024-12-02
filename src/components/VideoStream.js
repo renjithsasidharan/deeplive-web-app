@@ -48,9 +48,8 @@ const VideoStream = () => {
     const reconnectTimeoutRef = useRef(null);
     const animationFrameIdRef = useRef(null);
 
-    const FRAME_INTERVAL = 25 ;
-    const FRAME_WIDTH = 480*2;  // Reduced frame width
-    const FRAME_HEIGHT = 300*2; // Reduced frame height
+    const FRAME_WIDTH = 600*2;  // Reduced frame width
+    const FRAME_HEIGHT = 400*2; // Reduced frame height
 
     const streamRef = useRef(null);
 
@@ -262,6 +261,7 @@ const VideoStream = () => {
     }, [completedCrop, lastCompletedCrop]);
 
     const sendFrame = useCallback((timestamp) => {
+        const FRAME_INTERVAL = maintainFps ? 25 : 100;  // 40 FPS when maintaining, 10 FPS otherwise
         if (timestamp - lastFrameTimeRef.current >= FRAME_INTERVAL) {
             if (videoRef.current && canvasRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                 const context = canvasRef.current.getContext('2d');
@@ -342,7 +342,7 @@ const VideoStream = () => {
             lastFrameTimeRef.current = timestamp;
         }
         animationFrameIdRef.current = requestAnimationFrame(sendFrame);
-    }, [wsConnected, completedCrop, lastCompletedCrop, FRAME_HEIGHT, FRAME_WIDTH]);
+    }, [wsConnected, completedCrop, lastCompletedCrop, FRAME_HEIGHT, FRAME_WIDTH, maintainFps]);
 
     const fitVideoToCanvas = useCallback(() => {
         if (!videoRef.current) return;
